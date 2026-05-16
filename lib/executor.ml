@@ -22,16 +22,18 @@ let start main =
   let enqueue t = 
     Queue.enqueue ready_queue t
   in
-  let rec run_next () = 
+  let rec dispatch_next () = 
     match Queue.dequeue ready_queue with 
-    | Some (Fresh f) -> execute f
-    | Some (Suspended k) -> continue k ()
+    | Some (Fresh f) -> run f
+    | Some (Suspended k) -> resume k
     | None -> ()
-  and execute f = 
+  and run f = 
     match f () with 
-    | () -> run_next ()
-    | exception e -> print_endline (Exn.to_string e); run_next ()
-    | effect (Spawn f), k -> enqueue (Fresh f); continue k ()
-    | effect Yield, k -> enqueue (Suspended k); run_next ()
+    | () -> dispatch_next ()
+    | exception e -> print_endline (Exn.to_string e); dispatch_next ()
+    | effect (Spawn f), k -> enqueue (Fresh f); resume k
+    | effect Yield, k -> enqueue (Suspended k); dispatch_next ()
+  and resume k = 
+    continue k ()
   in
-  execute main
+  run main
