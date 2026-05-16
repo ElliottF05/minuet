@@ -1,0 +1,3 @@
+(library
+ (name minuet)
+ (libraries core))

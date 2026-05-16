@@ -1,0 +1,4 @@
+(executable
+ (public_name minuet)
+ (name main)
+ (libraries core minuet))
