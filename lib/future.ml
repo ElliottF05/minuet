@@ -1,10 +1,10 @@
 open Core
-module Mutex = Error_checking_mutex
+module Mutex = Stdlib.Mutex
 module Thread = Core_thread
 
 type 'a future_state = 
   | Pending of (unit, unit) continuation Queue.t
-  | Resolved of 'a
+  | Resolved of ('a, exn) Result.t
 type 'a t = {
   mutable state: 'a future_state;
   mutex: Mutex.t

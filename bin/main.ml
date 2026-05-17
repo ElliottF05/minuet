@@ -56,7 +56,7 @@ let test_await_basic () =
     ) in
     ignore (spawn (fun () ->
       prerr_endline "[consumer] waiting on future";
-      let result = await f in
+      let result = await_exn f in
       Printf.eprintf "[consumer] got %d\n" result
     ))
   )
@@ -70,7 +70,7 @@ let test_await_multiple_waiters () =
     ) in
     List.iter (List.range 0 3) ~f:(fun i ->
       ignore (spawn (fun () ->
-        let result = await f in
+        let result = await_exn f in
         Printf.eprintf "[waiter %d] got %d\n" i result
       ))
     )
@@ -85,12 +85,12 @@ let test_await_chained () =
       1
     ) in
     let b = spawn (fun () ->
-      let a_result = await a in
+      let a_result = await_exn a in
       Printf.eprintf "[B] got A=%d, computing\n" a_result;
       a_result + 1
     ) in
     ignore (spawn (fun () ->
-      let b_result = await b in
+      let b_result = await_exn b in
       Printf.eprintf "[C] got B=%d\n" b_result
     ))
   )
@@ -100,13 +100,13 @@ let test_await_blocking () =
   start (fun () ->
     let f = spawn_blocking (fun () ->
       prerr_endline "[thread] sleeping";
-      ignore (Core_unix.nanosleep 0.1);
+      ignore (Core_unix.nanosleep 0.2);
       prerr_endline "[thread] done";
       99
     ) in
     ignore (spawn (fun () ->
       prerr_endline "[consumer] waiting on blocking task";
-      let result = await f in
+      let result = await_exn f in
       Printf.eprintf "[consumer] got %d\n" result
     ))
   )
