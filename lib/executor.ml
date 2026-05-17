@@ -14,6 +14,7 @@ else is a private implementation detail *)
 
 type _ Effect.t += Spawn : (unit -> unit) -> unit Effect.t
 type _ Effect.t += Yield : unit Effect.t
+type _ Effect.t += Await : 'a Future.t -> unit Effect.t
 
 type task = 
   | Fresh of (unit -> unit)
@@ -48,6 +49,14 @@ and run f =
   | exception e -> print_endline (Exn.to_string e); dispatch_next ()
   | effect (Spawn f), k -> enqueue (Fresh f); continue k ()
   | effect Yield, k -> enqueue (Suspended k); dispatch_next ()
+  | effect (Await future), k -> 
+    Mutex.lock future.mutex;
+    begin match future.state with
+    | Pending _ -> Future.add_waiter future k
+    | Resolved _ -> enqueue (Suspended k)
+    end;
+    Mutex.unlock future.mutex;
+    dispatch_next ()
 
 
 (* --- public functions --- *)
@@ -76,6 +85,10 @@ let spawn_blocking f =
     Mutex.unlock future.mutex
   ) () in
   future
+
+let await future = 
+  perform (Await future);
+  Future.get_result future
 
 let start main = 
   run main

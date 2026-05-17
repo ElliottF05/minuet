@@ -19,7 +19,15 @@ let create () =
 let get_waiters t = 
   match t.state with 
   | Pending waiters -> waiters
-  | Resolved _ -> failwith "unreachable"
+  | Resolved _ -> assert false
+
+let get_result t = 
+  match t.state with 
+  | Pending _ -> assert false
+  | Resolved v -> v
+
+let add_waiter t k = 
+  Queue.enqueue (get_waiters t) k
 
 let resolve t v = 
   t.state <- Resolved v
