@@ -22,37 +22,49 @@ type task =
 type state = {
   ready_queue: task Queue.t;
   mutex: Mutex.t;
-  condition: Condition.t;
-  blocking_counter: int Atomic.t;
+  waiting_counter: int Atomic.t;
+  read_fds: Core_unix.File_descr.t list;
+  write_fds: Core_unix.File_descr.t list;
 }
 
 
 (* --- private members and functions --- *)
 
+let notify_read, notify_write = Core_unix.pipe ()
+
 let state = { 
   ready_queue = Queue.create ();
   mutex = Mutex.create ();
-  condition = Condition.create ();
-  blocking_counter = Atomic.make 0;
+  waiting_counter = Atomic.make 0;
+  read_fds = [notify_read];
+  write_fds = [];
 }
 
 let enqueue t = 
   Mutex.lock state.mutex;
   Queue.enqueue state.ready_queue t;
-  Condition.signal state.condition;
   Mutex.unlock state.mutex
 
 let rec dispatch_next () = 
-  Mutex.lock state.mutex;
   let rec wait_for_task () = 
     match Queue.dequeue state.ready_queue with 
     | Some t -> Some t
     | None -> 
-        if Atomic.get state.blocking_counter = 0 then None else begin
-          Condition.wait state.condition state.mutex; 
+        if Atomic.get state.waiting_counter = 0 then None else begin
+          Mutex.unlock state.mutex;
+          ignore (Core_unix.select 
+            ~read:state.read_fds ~write:state.write_fds ~except:[] 
+            ~timeout:(`Never) 
+          ());
+          ignore (Core_unix.read
+            notify_read
+            ~buf:(Bytes.create 64) ~pos:0 ~len:64
+          );
+          Mutex.lock state.mutex;
           wait_for_task ()
         end
   in
+  Mutex.lock state.mutex;
   let task = wait_for_task () in
   Mutex.unlock state.mutex;
   match task with 
@@ -66,13 +78,13 @@ and run f =
   | effect (Spawn f), k -> enqueue (Fresh f); continue k ()
   | effect Yield, k -> enqueue (Suspended k); dispatch_next ()
   | effect (Await future), k -> 
-    Mutex.lock future.mutex;
-    begin match future.state with
-    | Pending _ -> Future.add_waiter future k
-    | Resolved _ -> enqueue (Suspended k)
-    end;
-    Mutex.unlock future.mutex;
-    dispatch_next ()
+      Mutex.lock future.mutex;
+      begin match future.state with
+      | Pending _ -> Future.add_waiter future k
+      | Resolved _ -> enqueue (Suspended k)
+      end;
+      Mutex.unlock future.mutex;
+      dispatch_next ()
 
 
 (* --- public functions --- *)
@@ -94,7 +106,7 @@ let spawn f =
   future
 
 let spawn_blocking f = 
-  Atomic.incr state.blocking_counter;
+  Atomic.incr state.waiting_counter;
   let future = Future.create () in
   let _thread = Caml_threads.Thread.create (fun () ->
     let result = Result.try_with (fun () -> f ()) in
@@ -106,10 +118,8 @@ let spawn_blocking f =
       w
     in
     Queue.iter waiters ~f:(fun k -> enqueue (Suspended k));
-    Mutex.lock state.mutex;
-    Atomic.decr state.blocking_counter;
-    Condition.signal state.condition;
-    Mutex.unlock state.mutex
+    Atomic.decr state.waiting_counter;
+    ignore (Core_unix.write notify_write ~buf:(Bytes.create 1) ~pos:0 ~len:1);
   ) () in
   future
 
