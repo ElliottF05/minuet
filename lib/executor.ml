@@ -3,15 +3,11 @@ include Effect
 include Effect.Deep
 module Mutex = Stdlib.Mutex
 
-(* TODO: only spawn, spawn_blocking, and start should be externally accessible, everything
-else is a private implementation detail *)
-
 (* ready queue, run loop, spawn, yield *)
 
 
 (* --- types and effects --- *)
 
-type _ Effect.t += Spawn : (unit -> unit) -> unit Effect.t
 type _ Effect.t += Yield : unit Effect.t
 type _ Effect.t += Await : 'a Future.t -> unit Effect.t
 
@@ -120,7 +116,6 @@ let rec dispatch_next () =
 and run f = 
   match f () with 
   | () -> dispatch_next ()
-  | effect (Spawn f), k -> enqueue (Fresh f); continue k ()
   | effect Yield, k -> enqueue (Suspended k); dispatch_next ()
   | effect (Await future), k -> 
       Mutex.lock future.mutex;
@@ -136,11 +131,8 @@ and run f =
 
 let spawn f = 
   let future = Future.create () in
-  let f' = fun () -> 
-    let result = Result.try_with (fun () -> f ()) in
-    resolve_future future result
-  in
-  perform (Spawn f');
+  let f' () = resolve_future future (Result.try_with f) in
+  enqueue (Fresh f');
   future
 
 let spawn_blocking f = 
