@@ -28,6 +28,3 @@ let get_result t =
 
 let add_waiter t k = 
   Queue.enqueue (get_waiters t) k
-
-let resolve t v = 
-  t.state <- Resolved v

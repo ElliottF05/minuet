@@ -140,6 +140,98 @@ let test_await_multiple_blocking () =
     ))
   )
 
+let test_async_sleep_basic () =
+  start (fun () ->
+    ignore (spawn (fun () ->
+      prerr_endline "[task] before sleep";
+      ignore (await (sleep 0.2));
+      prerr_endline "[task] after sleep (should be ~0.2s later)"
+    ))
+  )
+
+let test_async_sleep_interleaved () =
+  start (fun () ->
+    ignore (spawn (fun () ->
+      prerr_endline "[A] before sleep";
+      ignore (await (sleep 0.3));
+      prerr_endline "[A] after sleep (should be ~0.3s later)"
+    ));
+    ignore (spawn (fun () ->
+      prerr_endline "[B] before sleep";
+      ignore (await (sleep 0.1));
+      prerr_endline "[B] after sleep (should be ~0.1s later, before A)"
+    ));
+    prerr_endline "[main] spawned A and B"
+  )
+
+(* B and C finish before A — verifies ordering *)
+let test_async_sleep_ordering () =
+  start (fun () ->
+    ignore (spawn (fun () ->
+      ignore (await (sleep 0.3));
+      prerr_endline "[A] done (should print 3rd)"
+    ));
+    ignore (spawn (fun () ->
+      ignore (await (sleep 0.1));
+      prerr_endline "[B] done (should print 1st)"
+    ));
+    ignore (spawn (fun () ->
+      ignore (await (sleep 0.2));
+      prerr_endline "[C] done (should print 2nd)"
+    ))
+  )
+
+(* sleep then do work, interleaved with a non-sleeping task *)
+let test_async_sleep_with_yielding_task () =
+  start (fun () ->
+    ignore (spawn (fun () ->
+      prerr_endline "[sleeper] going to sleep";
+      ignore (await (sleep 0.2));
+      prerr_endline "[sleeper] woke up"
+    ));
+    ignore (spawn (fun () ->
+      prerr_endline "[worker] step 1";
+      yield ();
+      prerr_endline "[worker] step 2";
+      yield ();
+      prerr_endline "[worker] step 3"
+    ))
+  )
+
+(* chained sleeps — total should be ~0.3s *)
+let test_async_sleep_chained () =
+  start (fun () ->
+    ignore (spawn (fun () ->
+      prerr_endline "[task] step 1";
+      ignore (await (sleep 0.1));
+      prerr_endline "[task] step 2 (~0.1s)";
+      ignore (await (sleep 0.1));
+      prerr_endline "[task] step 3 (~0.2s)";
+      ignore (await (sleep 0.1));
+      prerr_endline "[task] step 4 (~0.3s)"
+    ))
+  )
+
+(* sleep and blocking thread together *)
+let test_async_sleep_with_blocking () =
+  start (fun () ->
+    ignore (spawn (fun () ->
+      prerr_endline "[sleeper] sleeping 0.2s";
+      ignore (await (sleep 0.2));
+      prerr_endline "[sleeper] done"
+    ));
+    let f = spawn_blocking (fun () ->
+      prerr_endline "[thread] sleeping 0.1s";
+      ignore (Core_unix.nanosleep 0.1);
+      prerr_endline "[thread] done";
+      42
+    ) in
+    ignore (spawn (fun () ->
+      let result = await_exn f in
+      Printf.eprintf "[consumer] blocking result: %d (should arrive before sleeper)\n" result
+    ))
+  )
+
 let () =
   prerr_endline "=== test_interleaving ===";
   test_interleaving ();
@@ -156,4 +248,16 @@ let () =
   prerr_endline "=== test_await_blocking ===";
   test_await_blocking ();
   prerr_endline "=== test_await_multiple_blocking ===";
-  test_await_multiple_blocking ()
+  test_await_multiple_blocking ();
+  prerr_endline "=== test_async_sleep_basic ===";
+  test_async_sleep_basic ();
+  prerr_endline "=== test_async_sleep_interleaved ===";
+  test_async_sleep_interleaved ();
+  prerr_endline "=== test_async_sleep_ordering ===";
+  test_async_sleep_ordering ();
+  prerr_endline "=== test_async_sleep_with_yielding_task ===";
+  test_async_sleep_with_yielding_task ();
+  prerr_endline "=== test_async_sleep_chained ===";
+  test_async_sleep_chained ();
+  prerr_endline "=== test_async_sleep_with_blocking ===";
+  test_async_sleep_with_blocking ();
