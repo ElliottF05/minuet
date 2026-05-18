@@ -1,33 +1,10 @@
 open Core
-module Mutex = Stdlib.Mutex
-module Thread = Core_thread
 
-type 'a future_state = 
-  | Pending of (unit, unit) continuation Queue.t
+type 'a state = 
+  | Pending of (('a, exn) Result.t, unit) continuation Queue.t (* a waiter is an awaiting task's continuation, resumed with the ('a, exn) result once known *)
   | Resolved of ('a, exn) Result.t
 type 'a t = {
-  mutable state: 'a future_state;
-  mutex: Mutex.t
+  mutable state: 'a state
 }
 
-let create () = 
-  { 
-    state = Pending (Queue.create ()); 
-    mutex = Mutex.create ();
-  }
-
-let get_waiters t = 
-  match t.state with 
-  | Pending waiters -> waiters
-  | Resolved _ -> assert false
-
-let get_result t = 
-  match t.state with 
-  | Pending _ -> assert false
-  | Resolved v -> v
-
-let add_waiter t k = 
-  Queue.enqueue (get_waiters t) k
-
-let resolve t v = 
-  t.state <- Resolved v
+let create () = { state = Pending (Queue.create ()) }
