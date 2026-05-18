@@ -158,7 +158,7 @@ let await_exn future =
 let yield () = 
   perform Yield
 
-let sleep t = 
+let async_sleep t = 
   let wake_at = Core_unix.gettimeofday () +. t in
   let future = Future.create () in
   Pairing_heap.add state.timers (wake_at, future);
