@@ -7,17 +7,17 @@ module Mutex = Stdlib.Mutex
   - Threading: every task runs on the single executor thread; only spawn_blocking bodies run on other OS threads.
   - A blocking thread touches only blocking_completions (guarded by blocking_completions_mutex) and the wakeup_write channel. 
     It never touches the scheduler's internal ready_queue and other structures.
-  - ready_queue / wakeups / future.state / blocking_counter are executor-thread-only and don't need synchronization.
+  - ready_queue / timers / future.state / blocking_counter are executor-thread-only and don't need synchronization.
 *)
 
 (* --- types and effects --- *)
 
 type _ Effect.t += Yield : unit Effect.t
-type _ Effect.t += Await : 'a Future.t -> unit Effect.t
+type _ Effect.t += Await : 'a Future.t -> ('a, exn) Result.t Effect.t
 
 type task = 
   | Fresh of (unit -> unit)
-  | Suspended of (unit, unit) continuation
+  | Suspended of (unit -> unit)
 
 type state = {
   ready_queue: task Queue.t;
@@ -46,7 +46,9 @@ let resolve_future future result =
   | Resolved _ -> failwith "unreachable: future resolved twice"
   | Pending waiters ->
       future.state <- Future.Resolved result;
-      Queue.iter waiters ~f:(fun k -> Queue.enqueue state.ready_queue (Suspended k))
+      Queue.iter waiters ~f:(fun k -> 
+        Queue.enqueue state.ready_queue (Suspended (fun () -> continue k result))
+      )
 
 let rec resolve_expired_wakeups () = 
   match Pairing_heap.top state.timers with 
@@ -108,17 +110,19 @@ let rec wait_for_task () =
 let rec dispatch_next () = 
   match wait_for_task () with 
   | Some (Fresh f) -> run f
-  | Some (Suspended k) -> continue k ()
+  | Some (Suspended f) -> f ()
   | None -> ()
 
 and run f = 
   match f () with 
   | () -> dispatch_next ()
-  | effect Yield, k -> Queue.enqueue state.ready_queue (Suspended k); dispatch_next ()
+  | effect Yield, k -> 
+      Queue.enqueue state.ready_queue (Suspended (fun () -> continue k ())); 
+      dispatch_next ()
   | effect (Await future), k -> 
       begin match future.state with
       | Pending waiters -> Queue.enqueue waiters k
-      | Resolved _ -> Queue.enqueue state.ready_queue (Suspended k)
+      | Resolved result -> Queue.enqueue state.ready_queue (Suspended (fun () -> continue k result))
       end;
       dispatch_next ()
 
@@ -127,8 +131,8 @@ and run f =
 
 let spawn f = 
   let future = Future.create () in
-  let f' () = resolve_future future (Result.try_with f) in
-  Queue.enqueue state.ready_queue (Fresh f');
+  let run_and_resolve () = resolve_future future (Result.try_with f) in
+  Queue.enqueue state.ready_queue (Fresh run_and_resolve);
   future
 
 (** `f` runs on a separate OS thread, outside the scheduler: it must NOT
@@ -146,10 +150,7 @@ let spawn_blocking f =
   future
 
 let await future = 
-  perform (Await future);
-  match future.state with 
-  | Pending _ -> failwith "unreachable: future still pending after being awaited"
-  | Resolved v -> v
+  perform (Await future)
 
 let await_exn future = 
   Result.ok_exn (await future)
