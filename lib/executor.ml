@@ -42,9 +42,11 @@ let state = {
 }
 
 let resolve_future future result = 
-  let waiters = Future.get_waiters future in
-  future.state <- Future.Resolved result;
-  Queue.iter waiters ~f:(fun k -> Queue.enqueue state.ready_queue (Suspended k))
+  match future.Future.state with 
+  | Resolved _ -> failwith "future resolved twice"
+  | Pending waiters ->
+      future.state <- Future.Resolved result;
+      Queue.iter waiters ~f:(fun k -> Queue.enqueue state.ready_queue (Suspended k))
 
 let rec resolve_expired_wakeups () = 
   match Pairing_heap.top state.timers with 
@@ -115,7 +117,7 @@ and run f =
   | effect Yield, k -> Queue.enqueue state.ready_queue (Suspended k); dispatch_next ()
   | effect (Await future), k -> 
       begin match future.state with
-      | Pending _ -> Future.add_waiter future k
+      | Pending waiters -> Queue.enqueue waiters k
       | Resolved _ -> Queue.enqueue state.ready_queue (Suspended k)
       end;
       dispatch_next ()
@@ -145,7 +147,9 @@ let spawn_blocking f =
 
 let await future = 
   perform (Await future);
-  Future.get_result future
+  match future.state with 
+  | Pending _ -> failwith "future still pending after being awaited"
+  | Resolved v -> v
 
 let await_exn future = 
   Result.ok_exn (await future)
