@@ -1,10 +1,14 @@
-include Core
-include Effect
-include Effect.Deep
+open Core
+open Effect
+open Effect.Deep
 module Mutex = Stdlib.Mutex
 
-(* ready queue, run loop, spawn, yield *)
-
+(* Notes and invariants: 
+  - Threading: every task runs on the single executor thread; only spawn_blocking bodies run on other OS threads.
+  - A blocking thread touches only blocking_completions (guarded by blocking_completions_mutex) and the wakeup_write channel. 
+    It never touches the scheduler's internal ready_queue and other structures.
+  - ready_queue / wakeups / future.state / blocking_counter are executor-thread-only and don't need synchronization.
+*)
 
 (* --- types and effects --- *)
 
@@ -17,96 +21,90 @@ type task =
 
 type state = {
   ready_queue: task Queue.t;
-  ready_queue_mutex: Mutex.t;
-  blocking_counter: int Atomic.t;
-  read_fds: Core_unix.File_descr.t list;
-  write_fds: Core_unix.File_descr.t list;
-  wakeups: (float * unit Future.t) Pairing_heap.t;
+  timers: (float * unit Future.t) Pairing_heap.t;
+  blocking_completions: (unit -> unit) Queue.t;
+  blocking_completions_mutex: Mutex.t;
+  mutable blocking_in_flight: int;
 }
 
 
 (* --- private members and functions --- *)
 
-let notify_read, notify_write = Core_unix.pipe ()
-let () = Core_unix.set_nonblock notify_read
+let wakeup_read, wakeup_write = Core_unix.pipe ()
+let () = Core_unix.set_nonblock wakeup_read
 
 let state = { 
   ready_queue = Queue.create ();
-  ready_queue_mutex = Mutex.create ();
-  blocking_counter = Atomic.make 0;
-  read_fds = [notify_read];
-  write_fds = [];
-  wakeups = Pairing_heap.create ~cmp:(fun (t1, _) (t2, _) -> Float.compare t1 t2) ();
+  timers = Pairing_heap.create ~cmp:(fun (t1, _) (t2, _) -> Float.compare t1 t2) ();
+  blocking_in_flight = 0;
+  blocking_completions = Queue.create ();
+  blocking_completions_mutex = Mutex.create ();
 }
 
-let enqueue t = 
-  Mutex.lock state.ready_queue_mutex;
-  Queue.enqueue state.ready_queue t;
-  Mutex.unlock state.ready_queue_mutex
-
 let resolve_future future result = 
-  let waiters = 
-    let w = Future.get_waiters future in
-    future.state <- Future.Resolved result;
-    w
+  let waiters = Future.get_waiters future in
+  future.state <- Future.Resolved result;
+  Queue.iter waiters ~f:(fun k -> Queue.enqueue state.ready_queue (Suspended k))
+
+let rec resolve_expired_wakeups () = 
+  match Pairing_heap.top state.timers with 
+  | None -> ()
+  | Some (wake_at, future) -> 
+      if Float.(wake_at <= Core_unix.gettimeofday ()) then begin
+        Pairing_heap.remove_top state.timers;
+        resolve_future future (Ok ());
+        resolve_expired_wakeups ()
+      end
+
+let get_next_timeout () = 
+  match Pairing_heap.top state.timers with 
+  | None -> `Never
+  | Some (wake_at, _future) ->  
+      let delay = wake_at -. Core_unix.gettimeofday () in
+      if Float.(delay <= 0.0) then
+        `Immediately
+      else 
+        `After (Time_ns.Span.of_sec delay)
+
+let drain_notify_channel () = 
+  let buf = Bytes.create 64 in
+  let rec loop () = 
+    match Core_unix.read wakeup_read ~buf ~pos:0 ~len:64 with 
+    | _ -> loop ()
+    | exception Core_unix.Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> ()
+    | exception exn -> raise exn
   in
-  Queue.iter waiters ~f:(fun k -> enqueue (Suspended k))
+  loop ()
+
+let drain_blocking_completions () = 
+  Mutex.lock state.blocking_completions_mutex;
+  let completions = Queue.to_list state.blocking_completions in
+  Queue.clear state.blocking_completions;
+  Mutex.unlock state.blocking_completions_mutex;
+  List.iter completions ~f:(fun completion -> 
+    completion ();
+    state.blocking_in_flight <- state.blocking_in_flight - 1
+  )
+
+let rec wait_for_task () = 
+  drain_blocking_completions ();
+  resolve_expired_wakeups ();
+  match Queue.dequeue state.ready_queue with 
+  | Some task -> Some task
+  | None ->
+      let is_idle =  state.blocking_in_flight = 0 && Pairing_heap.is_empty state.timers in
+      if is_idle then 
+        None 
+      else (
+        ignore (Core_unix.select ~read:[wakeup_read] ~write:[] ~except:[] 
+          ~timeout:(get_next_timeout ())
+        ());
+        drain_notify_channel ();
+        wait_for_task ()
+      )
 
 let rec dispatch_next () = 
-  let rec resolve_expired_wakeups () = 
-    match Pairing_heap.top state.wakeups with 
-    | None -> ()
-    | Some (wake_at, future) -> 
-        if Float.(wake_at <= Core_unix.gettimeofday ()) then begin
-          Pairing_heap.remove_top state.wakeups;
-          resolve_future future (Ok ());
-          resolve_expired_wakeups ()
-        end
-  in
-  let get_timeout () = 
-    match Pairing_heap.top state.wakeups with 
-    | None -> `Never
-    | Some (wake_at, future) ->  
-        let delay = wake_at -. Core_unix.gettimeofday () in
-        if Float.(delay <= 0.0) then
-          `Immediately
-        else 
-          `After (Time_ns.Span.of_sec delay)
-  in
-  let drain_notify () = 
-    let buf = Bytes.create 64 in
-    let rec loop () = 
-      match Core_unix.read notify_read ~buf ~pos:0 ~len:64 with 
-      | _ -> loop ()
-      | exception Core_unix.Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> ()
-      | exception exn -> raise exn
-    in
-    loop ()
-  in
-  let rec wait_for_task () = 
-    match Queue.dequeue state.ready_queue with 
-    | Some t -> Some t
-    | None -> 
-        if Atomic.get state.blocking_counter = 0 && Pairing_heap.is_empty state.wakeups then 
-          None 
-        else begin
-          Mutex.unlock state.ready_queue_mutex; (* TODO: check why mutex needs to be released here *)
-          ignore (Core_unix.select 
-            ~read:state.read_fds ~write:state.write_fds ~except:[] 
-            ~timeout:(get_timeout ())
-          ());
-          drain_notify ();
-          resolve_expired_wakeups ();
-          Mutex.lock state.ready_queue_mutex;
-          wait_for_task ()
-        end
-  in
-
-  resolve_expired_wakeups ();
-  Mutex.lock state.ready_queue_mutex;
-  let task = wait_for_task () in
-  Mutex.unlock state.ready_queue_mutex;
-  match task with 
+  match wait_for_task () with 
   | Some (Fresh f) -> run f
   | Some (Suspended k) -> continue k ()
   | None -> ()
@@ -114,11 +112,11 @@ let rec dispatch_next () =
 and run f = 
   match f () with 
   | () -> dispatch_next ()
-  | effect Yield, k -> enqueue (Suspended k); dispatch_next ()
+  | effect Yield, k -> Queue.enqueue state.ready_queue (Suspended k); dispatch_next ()
   | effect (Await future), k -> 
       begin match future.state with
       | Pending _ -> Future.add_waiter future k
-      | Resolved _ -> enqueue (Suspended k)
+      | Resolved _ -> Queue.enqueue state.ready_queue (Suspended k)
       end;
       dispatch_next ()
 
@@ -128,17 +126,20 @@ and run f =
 let spawn f = 
   let future = Future.create () in
   let f' () = resolve_future future (Result.try_with f) in
-  enqueue (Fresh f');
+  Queue.enqueue state.ready_queue (Fresh f');
   future
 
+(** `f` runs on a separate OS thread, outside the scheduler: it must NOT
+call `await` / `yield` / `sleep` / `spawn`. *)
 let spawn_blocking f = 
-  Atomic.incr state.blocking_counter;
+  state.blocking_in_flight <- state.blocking_in_flight + 1;
   let future = Future.create () in
   let _thread = Caml_threads.Thread.create (fun () ->
     let result = Result.try_with (fun () -> f ()) in
-    resolve_future future result;
-    Atomic.decr state.blocking_counter;
-    ignore (Core_unix.write notify_write ~buf:(Bytes.create 1) ~pos:0 ~len:1)
+    Mutex.lock state.blocking_completions_mutex;
+    Queue.enqueue state.blocking_completions (fun () -> resolve_future future result);
+    Mutex.unlock state.blocking_completions_mutex;
+    ignore (Core_unix.write wakeup_write ~buf:(Bytes.create 1) ~pos:0 ~len:1)
   ) () in
   future
 
@@ -155,7 +156,7 @@ let yield () =
 let sleep t = 
   let wake_at = Core_unix.gettimeofday () +. t in
   let future = Future.create () in
-  Pairing_heap.add state.wakeups (wake_at, future);
+  Pairing_heap.add state.timers (wake_at, future);
   future
 
 let start main = 
