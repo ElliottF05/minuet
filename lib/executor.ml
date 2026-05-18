@@ -17,7 +17,7 @@ type task =
 
 type state = {
   ready_queue: task Queue.t;
-  mutex: Mutex.t;
+  ready_queue_mutex: Mutex.t;
   blocking_counter: int Atomic.t;
   read_fds: Core_unix.File_descr.t list;
   write_fds: Core_unix.File_descr.t list;
@@ -32,7 +32,7 @@ let () = Core_unix.set_nonblock notify_read
 
 let state = { 
   ready_queue = Queue.create ();
-  mutex = Mutex.create ();
+  ready_queue_mutex = Mutex.create ();
   blocking_counter = Atomic.make 0;
   read_fds = [notify_read];
   write_fds = [];
@@ -40,16 +40,14 @@ let state = {
 }
 
 let enqueue t = 
-  Mutex.lock state.mutex;
+  Mutex.lock state.ready_queue_mutex;
   Queue.enqueue state.ready_queue t;
-  Mutex.unlock state.mutex
+  Mutex.unlock state.ready_queue_mutex
 
 let resolve_future future result = 
   let waiters = 
-    Mutex.lock future.Future.mutex;
     let w = Future.get_waiters future in
     future.state <- Future.Resolved result;
-    Mutex.unlock future.mutex;
     w
   in
   Queue.iter waiters ~f:(fun k -> enqueue (Suspended k))
@@ -92,22 +90,22 @@ let rec dispatch_next () =
         if Atomic.get state.blocking_counter = 0 && Pairing_heap.is_empty state.wakeups then 
           None 
         else begin
-          Mutex.unlock state.mutex; (* TODO: check why mutex needs to be released here *)
+          Mutex.unlock state.ready_queue_mutex; (* TODO: check why mutex needs to be released here *)
           ignore (Core_unix.select 
             ~read:state.read_fds ~write:state.write_fds ~except:[] 
             ~timeout:(get_timeout ())
           ());
           drain_notify ();
           resolve_expired_wakeups ();
-          Mutex.lock state.mutex;
+          Mutex.lock state.ready_queue_mutex;
           wait_for_task ()
         end
   in
 
   resolve_expired_wakeups ();
-  Mutex.lock state.mutex;
+  Mutex.lock state.ready_queue_mutex;
   let task = wait_for_task () in
-  Mutex.unlock state.mutex;
+  Mutex.unlock state.ready_queue_mutex;
   match task with 
   | Some (Fresh f) -> run f
   | Some (Suspended k) -> continue k ()
@@ -118,12 +116,10 @@ and run f =
   | () -> dispatch_next ()
   | effect Yield, k -> enqueue (Suspended k); dispatch_next ()
   | effect (Await future), k -> 
-      Mutex.lock future.mutex;
       begin match future.state with
       | Pending _ -> Future.add_waiter future k
       | Resolved _ -> enqueue (Suspended k)
       end;
-      Mutex.unlock future.mutex;
       dispatch_next ()
 
 
