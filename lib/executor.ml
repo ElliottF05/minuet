@@ -43,7 +43,7 @@ let state = {
 
 let resolve_future future result = 
   match future.Future.state with 
-  | Resolved _ -> failwith "future resolved twice"
+  | Resolved _ -> failwith "unreachable: future resolved twice"
   | Pending waiters ->
       future.state <- Future.Resolved result;
       Queue.iter waiters ~f:(fun k -> Queue.enqueue state.ready_queue (Suspended k))
@@ -83,8 +83,8 @@ let drain_blocking_completions () =
   let completions = Queue.to_list state.blocking_completions in
   Queue.clear state.blocking_completions;
   Mutex.unlock state.blocking_completions_mutex;
-  List.iter completions ~f:(fun completion -> 
-    completion ();
+  List.iter completions ~f:(fun thunk -> 
+    thunk ();
     state.blocking_in_flight <- state.blocking_in_flight - 1
   )
 
@@ -148,7 +148,7 @@ let spawn_blocking f =
 let await future = 
   perform (Await future);
   match future.state with 
-  | Pending _ -> failwith "future still pending after being awaited"
+  | Pending _ -> failwith "unreachable: future still pending after being awaited"
   | Resolved v -> v
 
 let await_exn future = 
