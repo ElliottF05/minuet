@@ -108,12 +108,22 @@ let rec wait_for_task () =
   | Some task -> Some task
   | None when is_idle () -> None
   | None ->
-      ignore (Core_unix.select 
+      let { read; write; except }: Core_unix.Select_fds.t = Core_unix.select 
         ~read:(wakeup_read :: Hashtbl.keys state.read_waiters) 
         ~write:(Hashtbl.keys state.write_waiters) 
         ~except:[] 
         ~timeout:(get_next_timeout ())
-      ());
+      () in
+      List.iter read ~f:(fun fd -> 
+        match Hashtbl.find_and_remove state.read_waiters fd with 
+        | Some future -> resolve_future future (Ok ())
+        | None -> ()
+      );
+      List.iter write ~f:(fun fd -> 
+        match Hashtbl.find_and_remove state.write_waiters fd with 
+        | Some future -> resolve_future future (Ok ())
+        | None -> ()
+      );
       drain_notify_channel ();
       wait_for_task ()
 
@@ -172,6 +182,16 @@ let async_sleep t =
   let wake_at = Core_unix.gettimeofday () +. t in
   let future = Future.create () in
   Pairing_heap.add state.timers (wake_at, future);
+  future
+
+let async_wait_readable fd = 
+  let future = Future.create () in
+  Hashtbl.add_exn state.read_waiters ~key:fd ~data:future;
+  future
+
+let async_wait_writable fd = 
+  let future = Future.create () in
+  Hashtbl.add_exn state.write_waiters ~key:fd ~data:future;
   future
 
 let start main = 

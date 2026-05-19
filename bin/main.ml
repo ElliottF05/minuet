@@ -232,6 +232,23 @@ let test_async_sleep_with_blocking () =
     ))
   )
 
+let test_wait_readable () = 
+  start (fun () -> 
+    let r,w = Core_unix.pipe () in
+    ignore (spawn (fun () -> 
+      Printf.eprintf "[reader] waiting until readable\n";
+      ignore (await (async_wait_readable r));
+      let buf = Bytes.create 64 in
+      let n = Core_unix.read r ~buf:buf in
+      Printf.eprintf "[reader] read value %s\n" (Bytes.to_string (Bytes.sub buf ~pos:0 ~len:n))
+    ));
+    ignore (await (async_sleep 0.2));
+    Printf.eprintf "[writer] about to write value (should arrive before reader receives)\n";
+    ignore (Core_unix.write w ~buf:(Bytes.of_string "hello"));
+    ()
+  )
+
+
 let () =
   prerr_endline "=== test_interleaving ===";
   test_interleaving ();
@@ -261,3 +278,5 @@ let () =
   test_async_sleep_chained ();
   prerr_endline "=== test_async_sleep_with_blocking ===";
   test_async_sleep_with_blocking ();
+  prerr_endline "=== test_wait_readable ===";
+  test_wait_readable ();
