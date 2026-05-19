@@ -7,7 +7,7 @@ module Mutex = Stdlib.Mutex
   - Threading: every task runs on the single executor thread; only spawn_blocking bodies run on other OS threads.
   - A blocking thread touches only blocking_completions (guarded by blocking_completions_mutex) and the wakeup_write channel. 
     It never touches the scheduler's internal ready_queue and other structures.
-  - ready_queue / timers / future.state / blocking_counter are executor-thread-only and don't need synchronization.
+  - Everything except blocking_x in state is executor-thread-only and doesn't need synchronization.
 *)
 
 (* --- types and effects --- *)
@@ -22,6 +22,8 @@ type task =
 type state = {
   ready_queue: task Queue.t;
   timers: (float * unit Future.t) Pairing_heap.t;
+  read_waiters: (Core_unix.File_descr.t, unit Future.t) Hashtbl.t;
+  write_waiters: (Core_unix.File_descr.t, unit Future.t) Hashtbl.t;
   blocking_completions: (unit -> unit) Queue.t;
   blocking_completions_mutex: Mutex.t;
   mutable blocking_in_flight: int;
@@ -36,6 +38,8 @@ let () = Core_unix.set_nonblock wakeup_read
 let state = { 
   ready_queue = Queue.create ();
   timers = Pairing_heap.create ~cmp:(fun (t1, _) (t2, _) -> Float.compare t1 t2) ();
+  read_waiters = Hashtbl.create (module Core_unix.File_descr);
+  write_waiters = Hashtbl.create (module Core_unix.File_descr);
   blocking_in_flight = 0;
   blocking_completions = Queue.create ();
   blocking_completions_mutex = Mutex.create ();
@@ -59,6 +63,13 @@ let rec resolve_expired_wakeups () =
         resolve_future future (Ok ());
         resolve_expired_wakeups ()
       end
+
+let is_idle () = 
+  Queue.is_empty state.ready_queue
+  && Pairing_heap.is_empty state.timers
+  && Hashtbl.is_empty state.read_waiters
+  && Hashtbl.is_empty state.write_waiters
+  && state.blocking_in_flight = 0
 
 let get_next_timeout () = 
   match Pairing_heap.top state.timers with 
@@ -95,17 +106,16 @@ let rec wait_for_task () =
   resolve_expired_wakeups ();
   match Queue.dequeue state.ready_queue with 
   | Some task -> Some task
+  | None when is_idle () -> None
   | None ->
-      let is_idle =  state.blocking_in_flight = 0 && Pairing_heap.is_empty state.timers in
-      if is_idle then 
-        None 
-      else (
-        ignore (Core_unix.select ~read:[wakeup_read] ~write:[] ~except:[] 
-          ~timeout:(get_next_timeout ())
-        ());
-        drain_notify_channel ();
-        wait_for_task ()
-      )
+      ignore (Core_unix.select 
+        ~read:(wakeup_read :: Hashtbl.keys state.read_waiters) 
+        ~write:(Hashtbl.keys state.write_waiters) 
+        ~except:[] 
+        ~timeout:(get_next_timeout ())
+      ());
+      drain_notify_channel ();
+      wait_for_task ()
 
 let rec dispatch_next () = 
   match wait_for_task () with 
