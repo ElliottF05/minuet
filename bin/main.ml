@@ -56,7 +56,7 @@ let test_await_basic () =
     ) in
     ignore (spawn (fun () ->
       prerr_endline "[consumer] waiting on future";
-      let result = await_exn f in
+      let result = join_exn f in
       Printf.eprintf "[consumer] got %d\n" result
     ))
   )
@@ -70,7 +70,7 @@ let test_await_multiple_waiters () =
     ) in
     List.iter (List.range 0 3) ~f:(fun i ->
       ignore (spawn (fun () ->
-        let result = await_exn f in
+        let result = join_exn f in
         Printf.eprintf "[waiter %d] got %d\n" i result
       ))
     )
@@ -85,12 +85,12 @@ let test_await_chained () =
       1
     ) in
     let b = spawn (fun () ->
-      let a_result = await_exn a in
+      let a_result = join_exn a in
       Printf.eprintf "[B] got A=%d, computing\n" a_result;
       a_result + 1
     ) in
     ignore (spawn (fun () ->
-      let b_result = await_exn b in
+      let b_result = join_exn b in
       Printf.eprintf "[C] got B=%d\n" b_result
     ))
   )
@@ -106,7 +106,7 @@ let test_await_blocking () =
     ) in
     ignore (spawn (fun () ->
       prerr_endline "[consumer] waiting on blocking task";
-      let result = await_exn f in
+      let result = join_exn f in
       Printf.eprintf "[consumer] got %d\n" result
     ))
   )
@@ -133,9 +133,9 @@ let test_await_multiple_blocking () =
     ) in
     ignore (spawn (fun () ->
       prerr_endline "[consumer] waiting on all blocking tasks";
-      let r1 = await_exn f1 in
-      let r2 = await_exn f2 in
-      let r3 = await_exn f3 in
+      let r1 = join_exn f1 in
+      let r2 = join_exn f2 in
+      let r3 = join_exn f3 in
       Printf.eprintf "[consumer] got %d, %d, %d\n" r1 r2 r3
     ))
   )
@@ -144,7 +144,7 @@ let test_async_sleep_basic () =
   start (fun () ->
     ignore (spawn (fun () ->
       prerr_endline "[task] before sleep";
-      ignore (await (async_sleep 0.2));
+      sleep 0.2;
       prerr_endline "[task] after sleep (should be ~0.2s later)"
     ))
   )
@@ -153,12 +153,12 @@ let test_async_sleep_interleaved () =
   start (fun () ->
     ignore (spawn (fun () ->
       prerr_endline "[A] before sleep";
-      ignore (await (async_sleep 0.3));
+      sleep 0.3;
       prerr_endline "[A] after sleep (should be ~0.3s later)"
     ));
     ignore (spawn (fun () ->
       prerr_endline "[B] before sleep";
-      ignore (await (async_sleep 0.1));
+      sleep 0.1;
       prerr_endline "[B] after sleep (should be ~0.1s later, before A)"
     ));
     prerr_endline "[main] spawned A and B"
@@ -168,15 +168,15 @@ let test_async_sleep_interleaved () =
 let test_async_sleep_ordering () =
   start (fun () ->
     ignore (spawn (fun () ->
-      ignore (await (async_sleep 0.3));
+      sleep 0.3;
       prerr_endline "[A] done (should print 3rd)"
     ));
     ignore (spawn (fun () ->
-      ignore (await (async_sleep 0.1));
+      sleep 0.1;
       prerr_endline "[B] done (should print 1st)"
     ));
     ignore (spawn (fun () ->
-      ignore (await (async_sleep 0.2));
+      sleep 0.2;
       prerr_endline "[C] done (should print 2nd)"
     ))
   )
@@ -186,7 +186,7 @@ let test_async_sleep_with_yielding_task () =
   start (fun () ->
     ignore (spawn (fun () ->
       prerr_endline "[sleeper] going to sleep";
-      ignore (await (async_sleep 0.2));
+      sleep 0.2;
       prerr_endline "[sleeper] woke up"
     ));
     ignore (spawn (fun () ->
@@ -203,11 +203,11 @@ let test_async_sleep_chained () =
   start (fun () ->
     ignore (spawn (fun () ->
       prerr_endline "[task] step 1";
-      ignore (await (async_sleep 0.1));
+      sleep 0.1;
       prerr_endline "[task] step 2 (~0.1s)";
-      ignore (await (async_sleep 0.1));
+      sleep 0.1;
       prerr_endline "[task] step 3 (~0.2s)";
-      ignore (await (async_sleep 0.1));
+      sleep 0.1;
       prerr_endline "[task] step 4 (~0.3s)"
     ))
   )
@@ -217,7 +217,7 @@ let test_async_sleep_with_blocking () =
   start (fun () ->
     ignore (spawn (fun () ->
       prerr_endline "[sleeper] sleeping 0.2s";
-      ignore (await (async_sleep 0.2));
+      sleep 0.2;
       prerr_endline "[sleeper] done"
     ));
     let f = spawn_blocking (fun () ->
@@ -227,7 +227,7 @@ let test_async_sleep_with_blocking () =
       42
     ) in
     ignore (spawn (fun () ->
-      let result = await_exn f in
+      let result = join_exn f in
       Printf.eprintf "[consumer] blocking result: %d (should arrive before sleeper)\n" result
     ))
   )
@@ -237,12 +237,12 @@ let test_wait_readable () =
     let r,w = Core_unix.pipe () in
     ignore (spawn (fun () -> 
       Printf.eprintf "[reader] waiting until readable\n";
-      ignore (await (async_wait_readable r));
+      wait_readable r;
       let buf = Bytes.create 64 in
       let n = Core_unix.read r ~buf:buf in
       Printf.eprintf "[reader] read value %s\n" (Bytes.to_string (Bytes.sub buf ~pos:0 ~len:n))
     ));
-    ignore (await (async_sleep 0.2));
+    sleep 0.2;
     Printf.eprintf "[writer] about to write value (should arrive before reader receives)\n";
     ignore (Core_unix.write w ~buf:(Bytes.of_string "hello"));
     ()

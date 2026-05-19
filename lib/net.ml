@@ -29,14 +29,12 @@ let rec accept listen_fd =
   | (connection_fd, addr) -> Core_unix.set_nonblock connection_fd; (connection_fd, addr)
   | exception Core_unix.Unix_error ((Core_unix.EINTR | Core_unix.ECONNABORTED), _, _) -> accept listen_fd
   | exception Core_unix.Unix_error ((Core_unix.EWOULDBLOCK | Core_unix.EAGAIN), _, _) -> 
-      ignore (await (async_wait_readable listen_fd));
+      wait_readable listen_fd;
       accept listen_fd
 
 
 (* --- client side --- *)
 
-(* TODO: thoroughly check implementation here, it is complex and detailed unix stuff. please cross
-reference with online resources *)
 (** Note: `addr` must be an IPv4 address *)
 let connect addr = 
   let connection_fd = Core_unix.socket ~domain:Core_unix.PF_INET ~kind:Core_unix.SOCK_STREAM ~protocol:0 () in
@@ -49,7 +47,7 @@ let connect addr =
   match Core_unix.connect connection_fd ~addr with 
   | () -> Ok connection_fd
   | exception Core_unix.Unix_error ((Core_unix.EINPROGRESS | Core_unix.EINTR), _, _) -> 
-      ignore (await (async_wait_writable connection_fd));
+      wait_writable connection_fd;
       begin match Caml_unix.getsockopt_error connection_fd with 
       | None -> Ok connection_fd
       | Some err -> Core_unix.close connection_fd; Error err
@@ -67,7 +65,7 @@ let rec read fd buf ~pos ~len =
   | n -> Ok n
   | exception Core_unix.Unix_error (Core_unix.EINTR, _, _) -> read fd buf ~pos ~len
   | exception Core_unix.Unix_error ((Core_unix.EWOULDBLOCK | Core_unix.EAGAIN), _, _) -> 
-      ignore (await (async_wait_readable fd));
+      wait_readable fd;
       read fd buf ~pos ~len
   | exception Core_unix.Unix_error ((Core_unix.ECONNRESET | Core_unix.ETIMEDOUT) as err, _, _) -> Error err
 
@@ -77,7 +75,7 @@ let rec write fd buf ~pos ~len =
   | n -> Ok n
   | exception Core_unix.Unix_error (Core_unix.EINTR, _, _) -> write fd buf ~pos ~len 
   | exception Core_unix.Unix_error ((Core_unix.EWOULDBLOCK | Core_unix.EAGAIN), _, _) -> 
-      ignore (await (async_wait_writable fd));
+      wait_writable fd;
       write fd buf ~pos ~len
   | exception Core_unix.Unix_error ((Core_unix.ECONNRESET | Core_unix.ETIMEDOUT | Core_unix.EPIPE) as err, _, _) -> Error err
 

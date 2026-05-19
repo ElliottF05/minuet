@@ -14,18 +14,18 @@ module Mutex = Stdlib.Mutex
 
 (* --- types and effects --- *)
 
-type _ Effect.t += Yield : unit Effect.t
-type _ Effect.t += Await : 'a Future.t -> ('a, exn) Result.t Effect.t
+type _ Effect.t += Join : 'a Join_handle.t -> ('a, exn) Result.t Effect.t
+type _ Effect.t += Suspend : ((unit, unit) continuation -> unit) -> unit Effect.t
 
 type task = 
   | Fresh of (unit -> unit)
-  | Suspended of (unit -> unit)
+  | Continuation of (unit -> unit)
 
 type state = {
   ready_queue: task Queue.t;
-  timers: (float * unit Future.t) Pairing_heap.t;
-  read_waiters: (Core_unix.File_descr.t, unit Future.t) Hashtbl.t;
-  write_waiters: (Core_unix.File_descr.t, unit Future.t) Hashtbl.t;
+  timers: (float * (unit, unit) continuation) Pairing_heap.t;
+  read_waiters: (Core_unix.File_descr.t, (unit, unit) continuation) Hashtbl.t;
+  write_waiters: (Core_unix.File_descr.t, (unit, unit) continuation) Hashtbl.t;
   blocking_completions: (unit -> unit) Queue.t;
   blocking_completions_mutex: Mutex.t;
   mutable blocking_in_flight: int;
@@ -47,22 +47,25 @@ let state = {
   blocking_completions_mutex = Mutex.create ();
 }
 
-let resolve_future future result = 
-  match future.Future.state with 
-  | Resolved _ -> failwith "unreachable: future resolved twice"
+let enqueue_continuation k v = 
+  Queue.enqueue state.ready_queue (Continuation (fun () -> continue k v))
+
+let resolve_join_handle join_handle result = 
+  match join_handle.Join_handle.state with 
+  | Resolved _ -> failwith "unreachable: join_handle resolved twice"
   | Pending waiters ->
-      future.state <- Future.Resolved result;
+      join_handle.state <- Join_handle.Resolved result;
       Queue.iter waiters ~f:(fun k -> 
-        Queue.enqueue state.ready_queue (Suspended (fun () -> continue k result))
+        enqueue_continuation k result
       )
 
 let rec resolve_expired_wakeups () = 
   match Pairing_heap.top state.timers with 
   | None -> ()
-  | Some (wake_at, future) -> 
+  | Some (wake_at, k) -> 
       if Float.(wake_at <= Core_unix.gettimeofday ()) then begin
         Pairing_heap.remove_top state.timers;
-        resolve_future future (Ok ());
+        enqueue_continuation k ();
         resolve_expired_wakeups ()
       end
 
@@ -76,7 +79,7 @@ let is_idle () =
 let get_next_timeout () = 
   match Pairing_heap.top state.timers with 
   | None -> `Never
-  | Some (wake_at, _future) ->  
+  | Some (wake_at, _k) ->  
       let delay = wake_at -. Core_unix.gettimeofday () in
       if Float.(delay <= 0.0) then
         `Immediately
@@ -118,12 +121,12 @@ let rec wait_for_task () =
       () in
       List.iter read ~f:(fun fd -> 
         match Hashtbl.find_and_remove state.read_waiters fd with 
-        | Some future -> resolve_future future (Ok ())
+        | Some k -> enqueue_continuation k ()
         | None -> ()
       );
       List.iter write ~f:(fun fd -> 
         match Hashtbl.find_and_remove state.write_waiters fd with 
-        | Some future -> resolve_future future (Ok ())
+        | Some k -> enqueue_continuation k ()
         | None -> ()
       );
       drain_notify_channel ();
@@ -132,19 +135,19 @@ let rec wait_for_task () =
 let rec dispatch_next () = 
   match wait_for_task () with 
   | Some (Fresh f) -> run f
-  | Some (Suspended f) -> f ()
+  | Some (Continuation f) -> f ()
   | None -> ()
 
 and run f = 
   match f () with 
   | () -> dispatch_next ()
-  | effect Yield, k -> 
-      Queue.enqueue state.ready_queue (Suspended (fun () -> continue k ())); 
+  | effect (Suspend callback), k -> 
+      callback k;
       dispatch_next ()
-  | effect (Await future), k -> 
-      begin match future.state with
+  | effect (Join join_handle), k -> 
+      begin match join_handle.state with
       | Pending waiters -> Queue.enqueue waiters k
-      | Resolved result -> Queue.enqueue state.ready_queue (Suspended (fun () -> continue k result))
+      | Resolved result -> enqueue_continuation k result
       end;
       dispatch_next ()
 
@@ -152,49 +155,43 @@ and run f =
 (* --- public functions --- *)
 
 let spawn f = 
-  let future = Future.create () in
-  let run_and_resolve () = resolve_future future (Result.try_with f) in
+  let join_handle = Join_handle.create () in
+  let run_and_resolve () = resolve_join_handle join_handle (Result.try_with f) in
   Queue.enqueue state.ready_queue (Fresh run_and_resolve);
-  future
+  join_handle
 
 (** `f` runs on a separate OS thread, outside the scheduler: it must NOT
-call `await` / `yield` / `sleep` / `spawn`. *)
+call `join` / `yield` / `sleep` / `spawn`. *)
 let spawn_blocking f = 
   state.blocking_in_flight <- state.blocking_in_flight + 1;
-  let future = Future.create () in
+  let join_handle = Join_handle.create () in
   let _thread = Caml_threads.Thread.create (fun () ->
     let result = Result.try_with (fun () -> f ()) in
     Mutex.lock state.blocking_completions_mutex;
-    Queue.enqueue state.blocking_completions (fun () -> resolve_future future result);
+    Queue.enqueue state.blocking_completions (fun () -> resolve_join_handle join_handle result);
     Mutex.unlock state.blocking_completions_mutex;
     ignore (Core_unix.write wakeup_write ~buf:(Bytes.create 1) ~pos:0 ~len:1)
   ) () in
-  future
+  join_handle
 
-let await future = 
-  perform (Await future)
+let join join_handle = 
+  perform (Join join_handle)
 
-let await_exn future = 
-  Result.ok_exn (await future)
+let join_exn join_handle = 
+  Result.ok_exn (join join_handle)
 
 let yield () = 
-  perform Yield
+  perform (Suspend (fun k -> enqueue_continuation k ()))
 
-let async_sleep t = 
+let sleep t = 
   let wake_at = Core_unix.gettimeofday () +. t in
-  let future = Future.create () in
-  Pairing_heap.add state.timers (wake_at, future);
-  future
+  perform (Suspend (fun k -> Pairing_heap.add state.timers (wake_at, k)))
 
-let async_wait_readable fd = 
-  let future = Future.create () in
-  Hashtbl.add_exn state.read_waiters ~key:fd ~data:future;
-  future
+let wait_readable fd = 
+  perform (Suspend (fun k -> Hashtbl.add_exn state.read_waiters ~key:fd ~data:k))
 
-let async_wait_writable fd = 
-  let future = Future.create () in
-  Hashtbl.add_exn state.write_waiters ~key:fd ~data:future;
-  future
+let wait_writable fd = 
+  perform (Suspend (fun k -> Hashtbl.add_exn state.write_waiters ~key:fd ~data:k))
 
 let start main = 
   run main
