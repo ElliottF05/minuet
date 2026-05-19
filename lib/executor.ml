@@ -10,8 +10,6 @@ module Mutex = Stdlib.Mutex
   - Everything except blocking_x in state is executor-thread-only and doesn't need synchronization.
 *)
 
-(* TODO: should i check for EINTR (or other errors) on unix syscalls? *)
-
 (* --- types and effects --- *)
 
 type _ Effect.t += Join : 'a Join_handle.t -> ('a, exn) Result.t Effect.t
@@ -92,7 +90,7 @@ let drain_notify_channel () =
     match Core_unix.read wakeup_read ~buf ~pos:0 ~len:64 with 
     | _ -> loop ()
     | exception Core_unix.Unix_error ((Core_unix.EAGAIN | Core_unix.EWOULDBLOCK), _, _) -> ()
-    | exception exn -> raise exn
+    | exception Core_unix.Unix_error (Core_unix.EINTR, _, _) -> loop ()
   in
   loop ()
 
@@ -114,6 +112,7 @@ let rec wait_for_task () =
   | None when is_idle () -> None
   | None ->
       let { read; write; except }: Core_unix.Select_fds.t = Core_unix.select 
+        ~restart:true
         ~read:(wakeup_read :: Hashtbl.keys state.read_waiters) 
         ~write:(Hashtbl.keys state.write_waiters) 
         ~except:[] 
@@ -170,7 +169,12 @@ let spawn_blocking f =
     Mutex.lock state.blocking_completions_mutex;
     Queue.enqueue state.blocking_completions (fun () -> resolve_join_handle join_handle result);
     Mutex.unlock state.blocking_completions_mutex;
-    ignore (Core_unix.write wakeup_write ~buf:(Bytes.create 1) ~pos:0 ~len:1)
+    let rec notify () = 
+      match (Core_unix.write wakeup_write ~buf:(Bytes.create 1) ~pos:0 ~len:1) with 
+      | _n -> ()
+      | exception Core_unix.Unix_error (Core_unix.EINTR, _, _) -> notify ()
+    in
+    notify ()
   ) () in
   join_handle
 
