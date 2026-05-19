@@ -10,6 +10,8 @@ module Mutex = Stdlib.Mutex
   - Everything except blocking_x in state is executor-thread-only and doesn't need synchronization.
 *)
 
+(* TODO: should i check for EINTR (or other errors) on unix syscalls? *)
+
 (* --- types and effects --- *)
 
 type _ Effect.t += Yield : unit Effect.t

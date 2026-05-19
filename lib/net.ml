@@ -1,13 +1,7 @@
 open Core
 open Minuet
 
-(* TODO: check the following:
-- should i always use PF_INET?
-- should i always use SOCK_STREAM? (i think this is a pretty safe assumption) 
-- am i creating the socket_addr correctly? should i use localhost?
-- what value should i select for backlog?
-- does it matter where i set non blocking in listen? 
-- check variable/param naming, i dont have much experience working with low-level socket stuff *)
+(* TODO: is it worth checking for eintr? *)
 
 (* --- server side --- *)
 
@@ -22,8 +16,8 @@ let listen port =
 
 (* i assume this should be async since it shouldn't block waiting for new connections? *)
 (* im not really sure about the implementation here... *)
-let accept socket_fd = 
-  let (connection_fd, addr) = Core_unix.accept socket_fd in
+let accept listen_fd = 
+  let (connection_fd, addr) = Core_unix.accept listen_fd in
   Core_unix.set_nonblock connection_fd;
   (connection_fd, addr)
 
@@ -33,10 +27,10 @@ let accept socket_fd =
 (* should this be async? probably? *)
 (** Note: `addr` must be an IPv4 address *)
 let connect addr = 
-  let socket_fd = Core_unix.socket ~domain:Core_unix.PF_INET ~kind:Core_unix.SOCK_STREAM ~protocol:0 () in
-  Core_unix.set_nonblock socket_fd;
-  Core_unix.connect socket_fd ~addr;
-  socket_fd
+  let connection_fd = Core_unix.socket ~domain:Core_unix.PF_INET ~kind:Core_unix.SOCK_STREAM ~protocol:0 () in
+  Core_unix.set_nonblock connection_fd;
+  Core_unix.connect connection_fd ~addr;
+  connection_fd
 
 
 (* --- shared (both server and client) --- *)
@@ -48,8 +42,5 @@ let read fd buf ~pos ~len =
 let write fd buf ~pos ~len = 
   Core_unix.write fd ~buf ~pos ~len
 
-(* what about bigstring versions? *)
-
-(* im assuming this doesn't need to be async since its on shutdown, is there any other cleanup i need? *)
-let close socket_fd = 
-  Core_unix.close socket_fd
+let close fd = 
+  Core_unix.close fd
