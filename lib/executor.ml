@@ -88,7 +88,7 @@ let drain_notify_channel () =
   let rec loop () = 
     match Core_unix.read wakeup_read ~buf ~pos:0 ~len:64 with 
     | _ -> loop ()
-    | exception Core_unix.Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> ()
+    | exception Core_unix.Unix_error ((Core_unix.EAGAIN | Core_unix.EWOULDBLOCK), _, _) -> ()
     | exception exn -> raise exn
   in
   loop ()
