@@ -1,5 +1,6 @@
 open Core
 open Minuet.Executor
+module Net = Minuet.Net
 
 let test_interleaving () =
   start (fun () ->
@@ -249,8 +250,88 @@ let test_wait_readable () =
   )
 
 
+(* --- raw TCP echo (exercises Net + the reactor end to end) --- *)
+
+(* writes the whole [pos, pos+len) slice, looping over partial writes *)
+let rec send_all fd buf ~pos ~len =
+  if len = 0 then ()
+  else
+    match Net.write fd buf ~pos ~len with
+    | Ok 0 -> failwith "send_all: write returned 0"
+    | Ok n -> send_all fd buf ~pos:(pos + n) ~len:(len - n)
+    | Error err -> failwith ("send_all: " ^ Caml_unix.error_message err)
+
+(* echoes bytes back to the peer until the peer closes (read returns 0) *)
+let echo_conn conn_fd label =
+  let buf = Bytes.create 1024 in
+  let rec loop () =
+    match Net.read conn_fd buf ~pos:0 ~len:1024 with
+    | Ok 0 -> Printf.eprintf "[%s] peer closed\n" label
+    | Ok n ->
+        Printf.eprintf "[%s] echoing %d bytes\n" label n;
+        send_all conn_fd buf ~pos:0 ~len:n;
+        loop ()
+    | Error err -> Printf.eprintf "[%s] read error: %s\n" label (Caml_unix.error_message err)
+  in
+  loop ();
+  Net.close conn_fd
+
+(* connects to localhost:port, sends [msg], prints the echo, closes *)
+let echo_client port label msg =
+  let addr = Core_unix.ADDR_INET (Core_unix.Inet_addr.localhost, port) in
+  match Net.connect addr with
+  | Error err -> Printf.eprintf "[%s] connect failed: %s\n" label (Caml_unix.error_message err)
+  | Ok fd ->
+      send_all fd (Bytes.of_string msg) ~pos:0 ~len:(String.length msg);
+      let buf = Bytes.create 1024 in
+      (match Net.read fd buf ~pos:0 ~len:1024 with
+       | Ok n ->
+           Printf.eprintf "[%s] received echo: %S\n" label
+             (Bytes.to_string (Bytes.sub buf ~pos:0 ~len:n))
+       | Error err -> Printf.eprintf "[%s] read error: %s\n" label (Caml_unix.error_message err));
+      Net.close fd
+
+(* one client, one round-trip; server serves a single connection *)
+let test_tcp_echo_single () =
+  start (fun () ->
+    let port = 8131 in
+    let listen_fd = Net.listen port in
+    let server = spawn (fun () ->
+      let conn_fd, _addr = Net.accept listen_fd in
+      Net.close listen_fd;  (* only serving one connection *)
+      echo_conn conn_fd "server")
+    in
+    let client = spawn (fun () -> echo_client port "client" "hello, minuet") in
+    join_exn client;
+    join_exn server)
+
+(* accept loop: server serves N connections, one handler task each.
+   connection labels reflect accept order, not client index *)
+let test_tcp_echo_multi () =
+  start (fun () ->
+    let port = 8132 in
+    let n = 3 in
+    let listen_fd = Net.listen port in
+    let server = spawn (fun () ->
+      let handlers =
+        List.init n ~f:(fun i ->
+          let conn_fd, _addr = Net.accept listen_fd in
+          spawn (fun () -> echo_conn conn_fd (Printf.sprintf "server-conn-%d" i)))
+      in
+      Net.close listen_fd;
+      List.iter handlers ~f:join_exn)
+    in
+    let clients =
+      List.init n ~f:(fun i ->
+        spawn (fun () ->
+          echo_client port (Printf.sprintf "client-%d" i)
+            (Printf.sprintf "message from client %d" i)))
+    in
+    join_exn server;
+    List.iter clients ~f:join_exn)
+
 let () =
-  prerr_endline "=== test_interleaving ===";
+  (* prerr_endline "=== test_interleaving ===";
   test_interleaving ();
   prerr_endline "=== test_many_tasks ===";
   test_many_tasks ();
@@ -279,4 +360,9 @@ let () =
   prerr_endline "=== test_async_sleep_with_blocking ===";
   test_async_sleep_with_blocking ();
   prerr_endline "=== test_wait_readable ===";
-  test_wait_readable ();
+  test_wait_readable (); *)
+  prerr_endline "=== test_tcp_echo_single ===";
+  test_tcp_echo_single ();
+  prerr_endline "=== test_tcp_echo_multi ===";
+  test_tcp_echo_multi ();
+  ()
