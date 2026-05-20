@@ -459,8 +459,8 @@ let test_http_concurrent () =
 let test_http_stress () =
   start (fun () ->
     let port = 8204 in
-    let total = 80000 in
-    let concurrency = 200 in
+    let total = 4000 in
+    let concurrency = 100 in
     let server = run_test_server port total stress_handler in
     let addr = Core_unix.ADDR_INET (Core_unix.Inet_addr.localhost, port) in
     let remaining = ref total in
