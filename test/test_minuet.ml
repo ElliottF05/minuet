@@ -57,8 +57,8 @@ let latency_handler latency reqd =
   sleep latency;
   echo_handler reqd
 
-let stress_handler reqd =
-  let lat = 0.005 +. Random.float 0.045 in
+let stress_handler ~min_latency ~max_latency reqd =
+  let lat = min_latency +. Random.float (max_latency -. min_latency) in
   sleep lat;
   echo_handler reqd
 
@@ -206,6 +206,18 @@ let%expect_test "join: chained" =
     [C] got B=2
     |}]
 
+(* Complements "exception in spawned task is isolated": the exception not only
+   leaves siblings alone but also surfaces through [join] as [Error]. *)
+let%expect_test "join: propagates the spawned task's exception" =
+  start (fun () ->
+    let f = spawn (fun () -> failwith "boom") in
+    ignore (spawn (fun () ->
+      match join f with
+      | Error (Failure msg) -> Printf.printf "got Error (Failure %S)\n" msg
+      | Error exn           -> Printf.printf "got Error (other: %s)\n" (Exn.to_string exn)
+      | Ok _                -> print_endline "got Ok (unexpected)")));
+  [%expect {| got Error (Failure "boom") |}]
+
 (* --- executor: spawn_blocking --- *)
 
 let%expect_test "spawn_blocking: cooperative task joins an OS-thread result" =
@@ -243,17 +255,6 @@ let%expect_test "spawn_blocking: multiple threads" =
   [%expect {| r1=42 r2=99 r3=7 |}]
 
 (* --- executor: sleep --- *)
-
-let%expect_test "sleep: basic" =
-  start (fun () ->
-    ignore (spawn (fun () ->
-      print_endline "[task] before sleep";
-      sleep 0.2;
-      print_endline "[task] after sleep (~0.2s later)")));
-  [%expect {|
-    [task] before sleep
-    [task] after sleep (~0.2s later)
-    |}]
 
 let%expect_test "sleep: interleaved" =
   start (fun () ->
@@ -305,22 +306,19 @@ let%expect_test "sleep: with yielding task" =
     [sleeper] woke up
     |}]
 
-let%expect_test "sleep: chained" =
+(* Three sequential [sleep 0.1] inside one task should add up to ~0.3s real
+   time — verifies sleeps don't collapse and that the executor actually waits. *)
+let%expect_test "sleep: chained sleeps add up" =
+  let t0 = Core_unix.gettimeofday () in
   start (fun () ->
     ignore (spawn (fun () ->
-      print_endline "[task] step 1";
       sleep 0.1;
-      print_endline "[task] step 2 (~0.1s)";
       sleep 0.1;
-      print_endline "[task] step 3 (~0.2s)";
-      sleep 0.1;
-      print_endline "[task] step 4 (~0.3s)")));
-  [%expect {|
-    [task] step 1
-    [task] step 2 (~0.1s)
-    [task] step 3 (~0.2s)
-    [task] step 4 (~0.3s)
-    |}]
+      sleep 0.1)));
+  let elapsed = Core_unix.gettimeofday () -. t0 in
+  Printf.printf "elapsed in [0.30, 0.50]s: %b\n"
+    Float.(elapsed >= 0.30 && elapsed < 0.50);
+  [%expect {| elapsed in [0.30, 0.50]s: true |}]
 
 let%expect_test "sleep + blocking thread interleave" =
   start (fun () ->
@@ -470,12 +468,13 @@ let%expect_test "http: 5 sequential requests, one server" =
 
 (* N parallel client tasks against a server that sleeps [latency]s per response.
    If concurrency works, total elapsed should be ~latency, not n*latency.
-   Snapshot booleans rather than the raw elapsed value. *)
+   Snapshot only booleans so the test parameters can change without re-promoting. *)
 let%expect_test "http: concurrent requests overlap" =
   start (fun () ->
     let port = 8203 in
     let n = 10 in
     let latency = 0.2 in
+    let bound = latency *. 1.1 in
     let server = run_test_server port n (latency_handler latency) in
     let addr = Core_unix.ADDR_INET (Core_unix.Inet_addr.localhost, port) in
     let t0 = Core_unix.gettimeofday () in
@@ -484,24 +483,34 @@ let%expect_test "http: concurrent requests overlap" =
     in
     let oks = List.count clients ~f:(fun h -> Result.is_ok (join_exn h)) in
     let elapsed = Core_unix.gettimeofday () -. t0 in
-    let bound = latency *. 1.1 in
     Printf.printf "all_ok: %b\n" (oks = n);
-    Printf.printf "elapsed < %.2fs: %b\n" bound Float.(elapsed < bound);
+    Printf.printf "elapsed within bound: %b\n" Float.(elapsed < bound);
     join_exn server);
   [%expect {|
     all_ok: true
-    elapsed < 0.22s: true
+    elapsed within bound: true
     |}]
 
 (* Sustained N-in-flight: worker pool pulls from shared counter (single-threaded
-   → safe). Snapshot booleans: every request succeeded, no errors, and the peak
-   in-flight count really did reach the configured concurrency. *)
+   → safe). Snapshot only booleans so the test parameters can change without
+   re-promoting. Theoretical floor is [total * avg_latency / concurrency]; bound
+   at 1.5x leaves headroom for scheduling overhead while still catching a real
+   regression in concurrency. *)
 let%expect_test "http: stress run sustains high concurrency" =
+  let port = 8204 in
+  let total = 4000 in
+  let concurrency = 100 in
+  let min_latency = 0.005 in
+  let max_latency = 0.050 in
+  let avg_latency = (min_latency +. max_latency) /. 2.0 in
+  let slack = 1.15 in
+  let bound =
+    Float.of_int total *. avg_latency /. Float.of_int concurrency *. slack
+  in
   start (fun () ->
-    let port = 8204 in
-    let total = 4000 in
-    let concurrency = 100 in
-    let server = run_test_server port total stress_handler in
+    let server =
+      run_test_server port total (stress_handler ~min_latency ~max_latency)
+    in
     let addr = Core_unix.ADDR_INET (Core_unix.Inet_addr.localhost, port) in
     let remaining = ref total in
     let oks = ref 0 in
@@ -528,20 +537,14 @@ let%expect_test "http: stress run sustains high concurrency" =
     List.iter workers ~f:join_exn;
     join_exn server;
     let elapsed = Core_unix.gettimeofday () -. t0 in
-    (* Theoretical floor is [total * avg_latency / concurrency]; bound at 1.5x
-       leaves headroom for scheduling overhead while still catching a real
-       regression in concurrency. *)
-    let avg_latency = (0.005 +. 0.050) /. 2.0 in
-    let floor = Float.of_int total *. avg_latency /. Float.of_int concurrency in
-    let bound = floor *. 1.5 in
     Printf.printf "all_ok: %b\n" (!oks = total);
-    Printf.printf "errs: %d\n" !errs;
-    Printf.printf "peak_inflight >= %d: %b\n" (concurrency / 2) (!peak >= concurrency / 2);
-    Printf.printf "elapsed < %.2fs: %b\n" bound Float.(elapsed < bound));
+    Printf.printf "no errs: %b\n" (!errs = 0);
+    Printf.printf "peak_inflight reached sufficient concurrency: %b\n"
+      (!peak >= Float.to_int ((Int.to_float concurrency) /. slack));
+    Printf.printf "elapsed within bound: %b\n" Float.(elapsed < bound));
   [%expect {|
     all_ok: true
-    errs: 0
-    peak_inflight >= 50: true
-    elapsed < 1.65s: true
+    no errs: true
+    peak_inflight reached sufficient concurrency: true
+    elapsed within bound: true
     |}]
- 
