@@ -62,6 +62,9 @@ particular runtime.
 
 ## Quick start
 
+This creates a local opam switch, builds the library, and runs the example
+echo server along with the test suite.
+
 ```bash
 opam switch create . --deps-only -y   # create local switch + install deps (first time only)
 eval $(opam env)                      # activate the switch in your current shell
