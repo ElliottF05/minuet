@@ -361,6 +361,133 @@ let test_serve () =
     )
   )
 
+(* --- HTTP tests (h1 adapter end-to-end) --- *)
+
+(* a plain "hello <target>" responder *)
+let echo_handler reqd =
+  let req = H1.Reqd.request reqd in
+  let body = Printf.sprintf "hello %s" req.H1.Request.target in
+  let headers = H1.Headers.of_list [
+    "content-length", Int.to_string (String.length body);
+    "connection",     "close";
+  ] in
+  let response = H1.Response.create ~headers `OK in
+  H1.Reqd.respond_with_string reqd response body
+
+(* echo_handler with a fixed cooperative-sleep before responding *)
+let latency_handler latency reqd =
+  sleep latency;
+  echo_handler reqd
+
+(* echo_handler with random per-request latency in [5ms, 50ms] — the stress test handler *)
+let stress_handler reqd =
+  let lat = 0.005 +. Random.float 0.045 in
+  sleep lat;
+  echo_handler reqd
+
+let make_get path =
+  let headers = H1.Headers.of_list [
+    "host",       "localhost";
+    "connection", "close";
+  ] in
+  H1.Request.create ~headers `GET path
+
+(* Spawn a server that accepts exactly [n] connections, then closes the listener.
+   [Net.listen] runs synchronously here, so the port is bound before any client
+   tries to connect. Returns the accept-loop's join handle. *)
+let run_test_server port n handler =
+  let listen_fd = Net.listen port in
+  spawn (fun () ->
+    let conns = List.init n ~f:(fun _ ->
+      let conn_fd, _ = Net.accept listen_fd in
+      spawn (fun () -> Http.serve_connection conn_fd handler))
+    in
+    Net.close listen_fd;
+    List.iter conns ~f:join_exn)
+
+let test_http_single () =
+  start (fun () ->
+    let port = 8201 in
+    let server = run_test_server port 1 echo_handler in
+    let addr = Core_unix.ADDR_INET (Core_unix.Inet_addr.localhost, port) in
+    (match Http.request addr (make_get "/hello") with
+     | Ok (_resp, body) -> Printf.eprintf "[client] got: %S\n" body
+     | Error _          -> Printf.eprintf "[client] request failed\n");
+    join_exn server)
+
+let test_http_sequential () =
+  start (fun () ->
+    let port = 8202 in
+    let n = 5 in
+    let server = run_test_server port n echo_handler in
+    let addr = Core_unix.ADDR_INET (Core_unix.Inet_addr.localhost, port) in
+    List.iter (List.range 0 n) ~f:(fun i ->
+      match Http.request addr (make_get (Printf.sprintf "/%d" i)) with
+      | Ok (_resp, body) -> Printf.eprintf "[client] req %d: %S\n" i body
+      | Error _          -> Printf.eprintf "[client] req %d failed\n" i);
+    join_exn server)
+
+(* N parallel client tasks against a server that sleeps [latency]s per response.
+   If concurrency works, total elapsed should be ~latency, not n*latency. *)
+let test_http_concurrent () =
+  start (fun () ->
+    let port = 8203 in
+    let n = 10 in
+    let latency = 0.2 in
+    let server = run_test_server port n (latency_handler latency) in
+    let addr = Core_unix.ADDR_INET (Core_unix.Inet_addr.localhost, port) in
+    let t0 = Core_unix.gettimeofday () in
+    let clients = List.init n ~f:(fun i ->
+      spawn (fun () ->
+        Http.request addr (make_get (Printf.sprintf "/%d" i))))
+    in
+    let oks = ref 0 in
+    List.iter clients ~f:(fun h ->
+      match join_exn h with
+      | Ok _    -> incr oks
+      | Error _ -> ());
+    let elapsed = Core_unix.gettimeofday () -. t0 in
+    Printf.eprintf
+      "[concurrent] %d/%d ok; %.3fs elapsed (per-req latency %.1fs); effective concurrency ~%.1fx\n"
+      !oks n elapsed latency (Float.of_int n *. latency /. elapsed);
+    join_exn server)
+
+(* Sustained 100-in-flight: a worker pool of [concurrency] tasks that pull from
+   a shared [remaining] counter (single-threaded → no atomics needed). Each
+   worker loops doing requests until the counter is exhausted; total = 1000 jobs.
+   Server response time is random per request. *)
+let test_http_stress () =
+  start (fun () ->
+    let port = 8204 in
+    let total = 80000 in
+    let concurrency = 200 in
+    let server = run_test_server port total stress_handler in
+    let addr = Core_unix.ADDR_INET (Core_unix.Inet_addr.localhost, port) in
+    let remaining = ref total in
+    let oks = ref 0 in
+    let errs = ref 0 in
+    let t0 = Core_unix.gettimeofday () in
+    let workers = List.init concurrency ~f:(fun w ->
+      spawn (fun () ->
+        let rec loop () =
+          if !remaining > 0 then begin
+            decr remaining;
+            (match Http.request addr (make_get (Printf.sprintf "/w%d" w)) with
+             | Ok _    -> incr oks
+             | Error _ -> incr errs);
+            loop ()
+          end
+        in
+        loop ()))
+    in
+    List.iter workers ~f:join_exn;
+    let elapsed = Core_unix.gettimeofday () -. t0 in
+    Printf.eprintf
+      "[stress] %d ok / %d err out of %d; %.3fs elapsed (concurrency=%d)\n"
+      !oks !errs total elapsed concurrency;
+    join_exn server)
+
+
 let () =
   (* prerr_endline "=== test_interleaving ===";
   test_interleaving ();
@@ -396,6 +523,14 @@ let () =
   test_tcp_echo_single ();
   prerr_endline "=== test_tcp_echo_multi ===";
   test_tcp_echo_multi (); *)
-  prerr_endline "=== test_serve ===";
-  test_serve ();
+  (* prerr_endline "=== test_serve ===";
+  test_serve (); *)
+  prerr_endline "=== test_http_single ===";
+  test_http_single ();
+  prerr_endline "=== test_http_sequential ===";
+  test_http_sequential ();
+  prerr_endline "=== test_http_concurrent ===";
+  test_http_concurrent ();
+  prerr_endline "=== test_http_stress ===";
+  test_http_stress ();
   ()
