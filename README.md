@@ -27,8 +27,9 @@ but actually yield to other tasks.
   [`h1`](https://github.com/robur-coop/ocaml-h1) state machine.
 - **Direct-style API throughout.** `read`, `accept`, `request` block
   cooperatively and return their values, never futures or promises.
-- **`ppx_expect` test suite.** Includes a stress test that sustains 100
-  concurrent in-flight HTTP requests across 4000 total.
+- **`ppx_expect` test suite.** Includes a stress test that drives 4000 HTTP
+  requests through the scheduler with 100 always in flight, completing in
+  less than 1.5 seconds.
 
 ## Cooperative blocking via effects
 
