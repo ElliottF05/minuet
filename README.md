@@ -63,11 +63,12 @@ particular runtime.
 ## Quick start
 
 ```bash
-opam install . --deps-only        # h1, core, ppx_jane, etc.
+opam switch create . --deps-only  # create local switch + install deps (first time only)
+eval $(opam env)                  # activate the switch in your current shell
 dune build
 dune exec minuet                  # the example: echoing HTTP server on :8132
 curl -X POST -d 'hello' http://localhost:8132/   # -> "hello"
-dune test                         # run the snapshot suite
+dune test                         # run the snapshot suite                        # run the snapshot suite
 ```
 
 The example is in [`bin/example.ml`](bin/example.ml). The tests are in
