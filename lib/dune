@@ -1,3 +1,5 @@
 (library
  (name minuet)
- (libraries core core_unix core_unix.core_thread core_kernel.pairing_heap h1 bigstring-unix))
+ (libraries core core_unix core_unix.core_thread core_kernel.pairing_heap h1 bigstring-unix)
+ (private_modules join_handle)
+)

@@ -12,7 +12,9 @@ module Mutex = Stdlib.Mutex
 
 (* --- types and effects --- *)
 
-type _ Effect.t += Join : 'a Join_handle.t -> ('a, exn) Result.t Effect.t
+type 'a join_handle = 'a Join_handle.t
+
+type _ Effect.t += Join : 'a join_handle -> ('a, exn) Result.t Effect.t
 (** [Suspend f] suspends the current task by passing its continuation to [f],
 which registers it to be resumed later (e.g. on a timer or fd waiter). *)
 type _ Effect.t += Suspend : ((unit, unit) continuation -> unit) -> unit Effect.t
