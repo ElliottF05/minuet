@@ -22,8 +22,8 @@ val accept
 val connect 
   :  Core_unix.sockaddr 
   -> (Core_unix.File_descr.t, Core_unix.Error.t) Result.t
-(** [connect addr] opens a TCP connection to [addr], cooperatively blocking when
-    needed. The returned fd is non-blocking. *)
+(** [connect addr] opens a TCP connection to [addr] (must be IPv4), 
+    cooperatively blocking when needed. The returned fd is non-blocking. *)
 
 val read
   :  Core_unix.File_descr.t

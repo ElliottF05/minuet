@@ -2,8 +2,6 @@ open Core
 
 exception Unix_exception of Core_unix.Error.t
 
-(** Serve one accepted HTTP connection to completion: paired read/write loops,
-join both, close the fd. *)
 let serve_connection connection_fd request_handler =
   let config = H1.Config.default in
   let connection = H1.Server_connection.create ~config request_handler in
@@ -18,6 +16,8 @@ let serve_connection connection_fd request_handler =
             let rec consume off remaining =
               if remaining > 0 then begin
                 let bytes_consumed = H1.Server_connection.read connection read_buffer ~off ~len:remaining in
+                (* bytes_consumed = 0 means h1 needs to yield before consuming more, 
+                so stop consuming and loop back to next_read_operation. *)
                 if bytes_consumed = 0 then () else consume (off + bytes_consumed) (remaining - bytes_consumed)
               end
             in
@@ -64,10 +64,6 @@ let serve_connection connection_fd request_handler =
   Executor.join_exn writer;
   Net.close connection_fd
 
-
-(** Starts an HTTP/1.1 server on, accepting connections in a loop.
-Cooperatively yields to other tasks while waiting for connections or IO.
-Does not return. *)
 let serve ?bind_addr port request_handler =
   let listen_fd = Net.listen ?bind_addr port in
   let rec accept_loop () =
@@ -117,6 +113,8 @@ let request ?body addr req =
                 let rec consume off remaining = 
                   if remaining > 0 then begin
                     let bytes_consumed = H1.Client_connection.read connection read_buffer ~off ~len:remaining in
+                    (* bytes_consumed = 0 means h1 needs to yield before consuming more, 
+                    so stop consuming and loop back to next_read_operation. *)
                     if bytes_consumed = 0 then () else consume (off + bytes_consumed) (remaining - bytes_consumed)
                   end
                 in
