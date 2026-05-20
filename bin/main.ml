@@ -1,6 +1,7 @@
 open Core
 open Minuet.Executor
 module Net = Minuet.Net
+module Http = Minuet.Http
 
 let test_interleaving () =
   start (fun () ->
@@ -256,7 +257,7 @@ let test_wait_readable () =
 let rec send_all fd buf ~pos ~len =
   if len = 0 then ()
   else
-    match Net.write fd buf ~pos ~len with
+    match Net.write fd buf ~pos ~len () with
     | Ok 0 -> failwith "send_all: write returned 0"
     | Ok n -> send_all fd buf ~pos:(pos + n) ~len:(len - n)
     | Error err -> failwith ("send_all: " ^ Caml_unix.error_message err)
@@ -265,7 +266,7 @@ let rec send_all fd buf ~pos ~len =
 let echo_conn conn_fd label =
   let buf = Bytes.create 1024 in
   let rec loop () =
-    match Net.read conn_fd buf ~pos:0 ~len:1024 with
+    match Net.read conn_fd buf ~pos:0 ~len:1024 () with
     | Ok 0 -> Printf.eprintf "[%s] peer closed\n" label
     | Ok n ->
         Printf.eprintf "[%s] echoing %d bytes\n" label n;
@@ -284,7 +285,7 @@ let echo_client port label msg =
   | Ok fd ->
       send_all fd (Bytes.of_string msg) ~pos:0 ~len:(String.length msg);
       let buf = Bytes.create 1024 in
-      (match Net.read fd buf ~pos:0 ~len:1024 with
+      (match Net.read fd buf ~pos:0 ~len:1024 () with
        | Ok n ->
            Printf.eprintf "[%s] received echo: %S\n" label
              (Bytes.to_string (Bytes.sub buf ~pos:0 ~len:n))
@@ -330,6 +331,36 @@ let test_tcp_echo_multi () =
     join_exn server;
     List.iter clients ~f:join_exn)
 
+let test_serve () = 
+  start (fun () ->
+    Http.serve 8132 (fun reqd -> 
+      let request = H1.Reqd.request reqd in
+      let content_type =
+        match H1.Headers.get request.H1.Request.headers "content-type" with
+        | None -> "application/octet-stream"
+        | Some ct -> ct
+      in
+      let request_body = H1.Reqd.request_body reqd in
+      let buf = Buffer.create 256 in
+      let rec on_read bs ~off ~len =
+        Buffer.add_string buf (Bigstringaf.substring bs ~off ~len);
+        H1.Body.Reader.schedule_read request_body ~on_eof ~on_read
+      and on_eof () =
+        let body = Buffer.contents buf in
+        Printf.eprintf "[server] received message '%s', echoing...\n%!" body;
+        let response = H1.Response.create
+          ~headers:(H1.Headers.of_list [
+            "content-type", content_type;
+            "content-length", Int.to_string (String.length body);
+            "connection", "close"
+          ]) `OK
+        in
+        H1.Reqd.respond_with_string reqd response body
+      in
+      H1.Body.Reader.schedule_read request_body ~on_eof ~on_read
+    )
+  )
+
 let () =
   (* prerr_endline "=== test_interleaving ===";
   test_interleaving ();
@@ -360,9 +391,11 @@ let () =
   prerr_endline "=== test_async_sleep_with_blocking ===";
   test_async_sleep_with_blocking ();
   prerr_endline "=== test_wait_readable ===";
-  test_wait_readable (); *)
+  test_wait_readable ();
   prerr_endline "=== test_tcp_echo_single ===";
   test_tcp_echo_single ();
   prerr_endline "=== test_tcp_echo_multi ===";
-  test_tcp_echo_multi ();
+  test_tcp_echo_multi (); *)
+  prerr_endline "=== test_serve ===";
+  test_serve ();
   ()

@@ -13,6 +13,8 @@ module Mutex = Stdlib.Mutex
 (* --- types and effects --- *)
 
 type _ Effect.t += Join : 'a Join_handle.t -> ('a, exn) Result.t Effect.t
+(** [Suspend f] suspends the current task by passing its continuation to [f],
+which registers it to be resumed later (e.g. on a timer or fd waiter). *)
 type _ Effect.t += Suspend : ((unit, unit) continuation -> unit) -> unit Effect.t
 
 type task = 
@@ -140,8 +142,8 @@ let rec dispatch_next () =
 and run f = 
   match f () with 
   | () -> dispatch_next ()
-  | effect (Suspend callback), k -> 
-      callback k;
+  | effect (Suspend register), k -> 
+      register k;
       dispatch_next ()
   | effect (Join join_handle), k -> 
       begin match join_handle.state with
@@ -159,8 +161,8 @@ let spawn f =
   Queue.enqueue state.ready_queue (Fresh run_and_resolve);
   join_handle
 
-(** `f` runs on a separate OS thread, outside the scheduler: it must NOT
-call `join` / `yield` / `sleep` / `spawn`. *)
+(** [f] runs on a separate OS thread, outside the scheduler: it must NOT
+call [join] / [yield] / [sleep] / [spawn]. *)
 let spawn_blocking f = 
   state.blocking_in_flight <- state.blocking_in_flight + 1;
   let join_handle = Join_handle.create () in
@@ -190,6 +192,24 @@ let yield () =
 let sleep t = 
   let wake_at = Core_unix.gettimeofday () +. t in
   perform (Suspend (fun k -> Pairing_heap.add state.timers (wake_at, k)))
+
+(** [suspend register] suspends the current task. [register] is a function that
+is immediately called with a one-shot wakeup thunk of type [unit -> unit]. 
+[register] should store this thunk and arrange for it to be called when the task
+should resume — for example, storing it in a timer heap to be called after
+a delay. When the thunk is called, the task is re-enqueued and resumes from the
+point where [suspend] was called. 
+
+Example:
+    {[
+      (* suspend until someone calls [wakeup] *)
+      let wakeup_ref = ref (fun () -> ()) in
+      suspend (fun wakeup -> wakeup_ref := wakeup);
+      (* execution resumes here when !wakeup_ref () is called *)
+    ]} 
+*)
+let suspend register = 
+  perform (Suspend (fun k -> register (fun () -> enqueue_continuation k ())))
 
 let wait_readable fd = 
   perform (Suspend (fun k -> Hashtbl.add_exn state.read_waiters ~key:fd ~data:k))
