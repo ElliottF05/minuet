@@ -1,4 +1,4 @@
 (executable
  (public_name minuet)
- (name main)
+ (name example)
  (libraries core minuet h1))

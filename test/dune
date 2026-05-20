@@ -1,3 +1,5 @@
-(test
+(library
  (name test_minuet)
- (libraries minuet))
+ (libraries minuet core core_unix h1)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
