@@ -39,8 +39,7 @@ libraries like Lwt and Async predate this and use promises with chaining
 instead. Eio is a newer full-featued IO library built directly on effects. 
 Minuet is a much smaller demonstration of the same idea.
 
-The entire scheduler (apart from `join` and `join_exn`) is built on one internal
-effect: `Suspend`. Its handler takes the current task's continuation and hands 
+The entire scheduler is built on one internal effect: `Suspend` (technically `join` uses a similar but specialized `Join` effect). Its handler takes the current task's continuation and hands 
 it to a callback the caller provides, which controls when the task is resumed:
 
 ```ocaml
